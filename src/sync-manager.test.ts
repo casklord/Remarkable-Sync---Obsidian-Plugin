@@ -28,7 +28,12 @@ function memoryFileOps(): { ops: FileOps; files: Map<string, string> } {
 	return { ops, files };
 }
 
-function doc(id: string, name: string, version = 1): DocumentMetadata {
+function doc(
+	id: string,
+	name: string,
+	version = 1,
+	entryHash = ""
+): DocumentMetadata {
 	return {
 		id,
 		version,
@@ -38,7 +43,7 @@ function doc(id: string, name: string, version = 1): DocumentMetadata {
 		modifiedTime: "",
 		pinned: false,
 		isTrashed: false,
-		entryHash: "",
+		entryHash,
 	};
 }
 
@@ -168,6 +173,115 @@ test("an empty base path produces vault-relative paths (no leading slash)", asyn
 	for (const key of files.keys()) {
 		assert.ok(!key.startsWith("/"), `path must not start with '/': ${key}`);
 	}
+});
+
+// --- Change detection (issue #24) ---
+//
+// In the reMarkable sync-v3 root index, `version` is the document's sub-file
+// count, NOT a revision number. Edits to an existing page change the entry
+// hash but not the file count, so change detection must compare entryHash.
+
+test("needsSync detects edits with the same file count but a different entry hash", () => {
+	const state = new SyncState();
+	state.syncedDocs["doc-1"] = {
+		version: 5,
+		path: "Notes.pdf",
+		hash: "deadbeef",
+		syncedAt: "2026-01-01T00:00:00Z",
+		entryHash: "hash-before-edit",
+	};
+
+	// Handwriting added to an existing page: same file count, new entry hash.
+	assert.equal(
+		state.needsSync(doc("doc-1", "Notes", 5, "hash-after-edit")),
+		true
+	);
+});
+
+test("needsSync skips documents whose entry hash and file count are unchanged", () => {
+	const state = new SyncState();
+	state.syncedDocs["doc-1"] = {
+		version: 5,
+		path: "Notes.pdf",
+		hash: "deadbeef",
+		syncedAt: "2026-01-01T00:00:00Z",
+		entryHash: "same-hash",
+	};
+
+	assert.equal(state.needsSync(doc("doc-1", "Notes", 5, "same-hash")), false);
+});
+
+test("needsSync re-syncs when state predates entry-hash tracking", () => {
+	const state = new SyncState();
+	// State written by an older plugin version: no entryHash field.
+	state.syncedDocs["doc-1"] = {
+		version: 5,
+		path: "Notes.pdf",
+		hash: "deadbeef",
+		syncedAt: "2026-01-01T00:00:00Z",
+	};
+
+	// Re-sync once so any previously missed edits get picked up.
+	assert.equal(state.needsSync(doc("doc-1", "Notes", 5, "some-hash")), true);
+});
+
+test("needsSync still detects added pages when the cloud provides no entry hash", () => {
+	const state = new SyncState();
+	state.syncedDocs["doc-1"] = {
+		version: 5,
+		path: "Notes.pdf",
+		hash: "deadbeef",
+		syncedAt: "2026-01-01T00:00:00Z",
+	};
+
+	// No entryHash from the cloud: fall back to the file-count comparison.
+	assert.equal(state.needsSync(doc("doc-1", "Notes", 5)), false);
+	assert.equal(state.needsSync(doc("doc-1", "Notes", 6)), true);
+});
+
+test("sync re-processes an edited document instead of skipping it", async () => {
+	const { ops } = memoryFileOps();
+	const state = new SyncState();
+	state.syncedDocs["doc-1"] = {
+		version: 5,
+		path: "reMarkable/Notes.pdf",
+		hash: "deadbeef",
+		syncedAt: "2026-01-01T00:00:00Z",
+		entryHash: "hash-before-edit",
+	};
+	const manager = new SyncManager("/vault", "reMarkable", ops, state);
+
+	// Same file count (5), new entry hash — must be picked up, not skipped.
+	// The failing client makes the attempt observable as an error.
+	const results = await manager.sync(
+		failingClient([doc("doc-1", "Notes", 5, "hash-after-edit")]),
+		{ writeLog: false }
+	);
+
+	assert.equal(results.skipped.length, 0);
+	assert.equal(results.errorDetails.length, 1);
+	assert.equal(results.errorDetails[0].docId, "doc-1");
+});
+
+test("sync skips an unchanged document", async () => {
+	const { ops } = memoryFileOps();
+	const state = new SyncState();
+	state.syncedDocs["doc-1"] = {
+		version: 5,
+		path: "reMarkable/Notes.pdf",
+		hash: "deadbeef",
+		syncedAt: "2026-01-01T00:00:00Z",
+		entryHash: "same-hash",
+	};
+	const manager = new SyncManager("/vault", "reMarkable", ops, state);
+
+	const results = await manager.sync(
+		failingClient([doc("doc-1", "Notes", 5, "same-hash")]),
+		{ writeLog: false }
+	);
+
+	assert.equal(results.skipped.length, 1);
+	assert.equal(results.errors.length, 0);
 });
 
 test("an empty subfolder writes at the vault root without a leading slash", async () => {
