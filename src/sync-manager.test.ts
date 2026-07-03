@@ -175,11 +175,7 @@ test("an empty base path produces vault-relative paths (no leading slash)", asyn
 	}
 });
 
-// --- Change detection (issue #24) ---
-//
-// In the reMarkable sync-v3 root index, `version` is the document's sub-file
-// count, NOT a revision number. Edits to an existing page change the entry
-// hash but not the file count, so change detection must compare entryHash.
+// --- Change detection (issue #24): `version` is a file count, so edits must be caught via entryHash ---
 
 test("needsSync detects edits with the same file count but a different entry hash", () => {
 	const state = new SyncState();
@@ -251,8 +247,7 @@ test("sync re-processes an edited document instead of skipping it", async () => 
 	};
 	const manager = new SyncManager("/vault", "reMarkable", ops, state);
 
-	// Same file count (5), new entry hash — must be picked up, not skipped.
-	// The failing client makes the attempt observable as an error.
+	// Same file count, new hash: the failing client makes the sync attempt visible as an error.
 	const results = await manager.sync(
 		failingClient([doc("doc-1", "Notes", 5, "hash-after-edit")]),
 		{ writeLog: false }

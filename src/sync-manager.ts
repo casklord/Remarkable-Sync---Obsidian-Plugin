@@ -23,13 +23,7 @@ export interface SyncedDocInfo {
 	path: string;
 	hash: string;
 	syncedAt: string;
-	/**
-	 * reMarkable root-index entry hash at the time of sync. Content-addressed:
-	 * changes on ANY edit to the document, unlike `version` (which in the
-	 * sync-v3 root index is the sub-file count and only changes when pages are
-	 * added or removed). Optional because state files written by older plugin
-	 * versions don't have it.
-	 */
+	/** Root-index entry hash; changes on any edit. Absent in pre-1.0.8 state files. */
 	entryHash?: string;
 }
 
@@ -66,11 +60,7 @@ export class SyncState {
 	needsSync(doc: DocumentMetadata): boolean {
 		const synced = this.syncedDocs[doc.id];
 		if (!synced) return true;
-		// The entry hash changes on any content edit (handwriting, text,
-		// rename), while `version` — the sub-file count in the sync-v3 root
-		// index — only changes when pages are added or removed. A missing
-		// stored hash (state from an older plugin version) also triggers a
-		// re-sync so previously missed edits get picked up.
+		// `version` is the sub-file count, not a revision — only the entry hash catches edits.
 		if (doc.entryHash && synced.entryHash !== doc.entryHash) return true;
 		return (synced.version ?? 0) < doc.version;
 	}
