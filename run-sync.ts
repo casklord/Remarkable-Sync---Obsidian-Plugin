@@ -9,6 +9,7 @@ const fileOps: FileOps = {
 	writeBinaryFile: async (p: string, data: Uint8Array) => { await fs.promises.mkdir(path.dirname(p), { recursive: true }); await fs.promises.writeFile(p, data); },
 	mkdir: async (p: string) => { await fs.promises.mkdir(p, { recursive: true }); },
 	exists: async (p: string) => { try { await fs.promises.access(p); return true; } catch { return false; } },
+	deleteFile: async (p: string) => { await fs.promises.rm(p, { force: true }); },
 };
 
 async function main() {

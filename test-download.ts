@@ -14,6 +14,7 @@ const fileOps: FileOps = {
 	writeBinaryFile: async (p, data) => { await fs.promises.mkdir(path.dirname(p), { recursive: true }); await fs.promises.writeFile(p, data); },
 	mkdir: async (p) => { await fs.promises.mkdir(p, { recursive: true }); },
 	exists: async (p) => { try { await fs.promises.access(p); return true; } catch { return false; } },
+	deleteFile: async (p) => { await fs.promises.rm(p, { force: true }); },
 };
 
 async function main() {

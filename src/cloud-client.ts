@@ -54,6 +54,7 @@ export interface FileOps {
 	writeBinaryFile(path: string, data: Uint8Array): Promise<void>;
 	mkdir(path: string): Promise<void>;
 	exists(path: string): Promise<boolean>;
+	deleteFile(path: string): Promise<void>;
 }
 
 // --- Token storage ---
@@ -116,6 +117,7 @@ export class TokenStore {
 
 export interface DocumentMetadata {
 	id: string;
+	/** Sub-file count from the root index, NOT a revision — see issue #24. */
 	version: number;
 	name: string;
 	parent: string;
@@ -140,7 +142,8 @@ function docFromSync15(
 		docType: metadata.type ?? "DocumentType",
 		modifiedTime: metadata.lastModified ?? "",
 		pinned: metadata.pinned ?? false,
-		isTrashed: metadata.deleted ?? false,
+		// The device trashes documents by reparenting to "trash", not by setting `deleted`.
+		isTrashed: (metadata.deleted ?? false) || metadata.parent === "trash",
 		entryHash,
 	};
 }

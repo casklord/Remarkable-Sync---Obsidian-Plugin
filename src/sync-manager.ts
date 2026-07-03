@@ -19,11 +19,12 @@ import { SYNC_LOG_FILENAME, SYNC_LOG_MAX_BYTES } from "./constants";
 // --- Sync state ---
 
 export interface SyncedDocInfo {
+	/** Sub-file count at last sync (the root index has no real revision number). */
 	version: number;
 	path: string;
 	hash: string;
 	syncedAt: string;
-	/** Root-index entry hash; changes on any edit. Absent in pre-1.0.8 state files. */
+	/** Root-index entry hash; changes on any edit. Absent in state files from before entry-hash tracking. */
 	entryHash?: string;
 }
 
@@ -38,7 +39,10 @@ export class SyncState {
 			if (!data) return state;
 			const parsed = JSON.parse(data);
 			state.lastSync = parsed.last_sync ?? null;
-			state.syncedDocs = parsed.synced_docs ?? {};
+			const docs = parsed.synced_docs;
+			// Guard against hand-edited/corrupt state: anything but a plain object resets.
+			state.syncedDocs =
+				docs && typeof docs === "object" && !Array.isArray(docs) ? docs : {};
 		} catch {
 			// No state file or invalid JSON
 		}
@@ -239,8 +243,15 @@ export class SyncManager {
 			}
 		}
 
-		this.state.lastSync = new Date().toISOString();
-		await this.state.save(this.stateFile, this.fileOps);
+		if (!opts.dryRun) {
+			this.state.lastSync = new Date().toISOString();
+			try {
+				await this.state.save(this.stateFile, this.fileOps);
+			} catch (e) {
+				// Per-doc saves already persisted progress; still finalize and log.
+				progress(`[FAIL] Could not save sync state: ${(e as Error).message}`);
+			}
+		}
 
 		progress(
 			`Sync finished — ${results.synced.length} synced, ` +
@@ -301,24 +312,40 @@ export class SyncManager {
 		progress(`Converting: ${docPath}...`);
 		const pdfData = await convertDocument(doc.id, zipData);
 
-		// Sanitize path for Windows
-		const safePath = docPath.replace(/[<>:"|?*]/g, "_");
+		// Sanitize path for Windows (backslash included: names must not create folders)
+		const safePath = docPath.replace(/[<>:"|?*\\]/g, "_");
 		const outputPath = joinPath(this.outputDir, safePath + ".pdf");
 
 		// Ensure parent directory exists
 		const parentDir = outputPath.substring(0, outputPath.lastIndexOf("/"));
 		if (parentDir) await this.fileOps.mkdir(parentDir);
 
-		// Write PDF
-		await this.fileOps.writeBinaryFile(outputPath, pdfData);
-
-		// Compute MD5-like hash (simple hash for change detection)
 		const hash = simpleHash(pdfData);
+		const relativePath = this.toVaultRelative(outputPath);
+		const previous = this.state.syncedDocs[doc.id];
 
-		// Relative path from vault root
-		const relativePath = outputPath.startsWith(this.vaultPath + "/")
-			? outputPath.substring(this.vaultPath.length + 1)
-			: outputPath;
+		// Metadata-only changes re-render the same bytes; skip the write to spare
+		// vault watchers (Obsidian Sync, backups) a spurious mtime bump.
+		const unchanged =
+			previous?.hash === hash &&
+			previous?.path === relativePath &&
+			(await this.fileOps.exists(outputPath));
+		if (!unchanged) {
+			await this.fileOps.writeBinaryFile(outputPath, pdfData);
+		}
+
+		// A rename/move re-syncs to a new path; drop the stale PDF at the old one.
+		if (previous && previous.path !== relativePath) {
+			const oldPath = joinPath(this.vaultPath, previous.path);
+			try {
+				if (await this.fileOps.exists(oldPath)) {
+					await this.fileOps.deleteFile(oldPath);
+					progress(`Removed old copy: ${previous.path}`);
+				}
+			} catch (e) {
+				progress(`(could not remove old copy ${previous.path}: ${(e as Error).message})`);
+			}
+		}
 
 		this.state.syncedDocs[doc.id] = {
 			version: doc.version,
@@ -328,6 +355,13 @@ export class SyncManager {
 			entryHash: doc.entryHash,
 		};
 		await this.state.save(this.stateFile, this.fileOps);
+	}
+
+	/** Strip the vault prefix so state paths stay portable across vault locations. */
+	private toVaultRelative(p: string): string {
+		return p.startsWith(this.vaultPath + "/")
+			? p.substring(this.vaultPath.length + 1)
+			: p;
 	}
 
 	async listRemote(
@@ -347,7 +381,7 @@ export class SyncManager {
 					path: folderPaths.get(doc.id) ?? doc.name,
 					version: doc.version,
 					modified: doc.modifiedTime,
-					synced: doc.id in this.state.syncedDocs,
+					synced: !this.state.needsSync(doc),
 				});
 			}
 		}
