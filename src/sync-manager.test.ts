@@ -209,6 +209,11 @@ test("an empty base path produces vault-relative paths (no leading slash)", asyn
 
 // --- Change detection (issue #24): `version` is a file count, so edits must be caught via entryHash ---
 
+test("needsSync always syncs a document with no state entry", () => {
+	const state = new SyncState();
+	assert.equal(state.needsSync(doc("doc-1", "New", 3, "hash-1")), true);
+});
+
 test("needsSync detects edits with the same file count but a different entry hash", () => {
 	const state = new SyncState();
 	state.syncedDocs["doc-1"] = syncedInfo("hash-before-edit");

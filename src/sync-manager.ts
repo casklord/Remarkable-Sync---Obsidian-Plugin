@@ -64,8 +64,9 @@ export class SyncState {
 	needsSync(doc: DocumentMetadata): boolean {
 		const synced = this.syncedDocs[doc.id];
 		if (!synced) return true;
-		// `version` is the sub-file count, not a revision — only the entry hash catches edits.
-		if (doc.entryHash && synced.entryHash !== doc.entryHash) return true;
+		// The entry hash is authoritative when present: it changes on any edit,
+		// while `version` is the sub-file count and misses in-place edits.
+		if (doc.entryHash) return synced.entryHash !== doc.entryHash;
 		return (synced.version ?? 0) < doc.version;
 	}
 }
