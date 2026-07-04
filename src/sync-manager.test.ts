@@ -11,24 +11,38 @@ import assert from "node:assert/strict";
 import { SyncManager, SyncState } from "./sync-manager";
 import type { DocumentMetadata, FileOps, RemarkableCloudClient } from "./cloud-client";
 
-/** In-memory FileOps that records all writes. */
-function memoryFileOps(): { ops: FileOps; files: Map<string, string> } {
+/** In-memory FileOps that records all writes (binary writes also logged by path). */
+function memoryFileOps(): {
+	ops: FileOps;
+	files: Map<string, string>;
+	binaryWrites: string[];
+} {
 	const files = new Map<string, string>();
+	const binaryWrites: string[] = [];
 	const ops: FileOps = {
 		readFile: async (p: string) => files.get(p) ?? null,
 		writeFile: async (p: string, data: string) => {
 			files.set(p, data);
 		},
 		writeBinaryFile: async (p: string, data: Uint8Array) => {
+			binaryWrites.push(p);
 			files.set(p, `<binary:${data.length}>`);
 		},
 		mkdir: async () => {},
 		exists: async (p: string) => files.has(p),
+		deleteFile: async (p: string) => {
+			files.delete(p);
+		},
 	};
-	return { ops, files };
+	return { ops, files, binaryWrites };
 }
 
-function doc(id: string, name: string, version = 1): DocumentMetadata {
+function doc(
+	id: string,
+	name: string,
+	version = 1,
+	entryHash = ""
+): DocumentMetadata {
 	return {
 		id,
 		version,
@@ -38,7 +52,18 @@ function doc(id: string, name: string, version = 1): DocumentMetadata {
 		modifiedTime: "",
 		pinned: false,
 		isTrashed: false,
-		entryHash: "",
+		entryHash,
+	};
+}
+
+/** Stored-state fixture; only the fields under test vary. */
+function syncedInfo(entryHash?: string, path = "reMarkable/Notes.pdf") {
+	return {
+		version: 5,
+		path,
+		hash: "deadbeef",
+		syncedAt: "2026-01-01T00:00:00Z",
+		...(entryHash === undefined ? {} : { entryHash }),
 	};
 }
 
@@ -50,6 +75,18 @@ function failingClient(docs: DocumentMetadata[]): RemarkableCloudClient {
 		downloadDocument: async (id: string) => {
 			throw new Error(`boom for ${id}`);
 		},
+	} as unknown as RemarkableCloudClient;
+}
+
+/** Fake client serving a minimal convertible document (one empty page). */
+function successClient(docs: DocumentMetadata[]): RemarkableCloudClient {
+	return {
+		isAuthenticated: true,
+		listDocuments: async () => docs,
+		downloadDocument: async (id: string) =>
+			new Map([
+				[`${id}.content`, new TextEncoder().encode('{"pages":["p1"]}')],
+			]),
 	} as unknown as RemarkableCloudClient;
 }
 
@@ -168,6 +205,148 @@ test("an empty base path produces vault-relative paths (no leading slash)", asyn
 	for (const key of files.keys()) {
 		assert.ok(!key.startsWith("/"), `path must not start with '/': ${key}`);
 	}
+});
+
+// --- Change detection (issue #24): `version` is a file count, so edits must be caught via entryHash ---
+
+test("needsSync always syncs a document with no state entry", () => {
+	const state = new SyncState();
+	assert.equal(state.needsSync(doc("doc-1", "New", 3, "hash-1")), true);
+});
+
+test("needsSync detects edits with the same file count but a different entry hash", () => {
+	const state = new SyncState();
+	state.syncedDocs["doc-1"] = syncedInfo("hash-before-edit");
+
+	// Handwriting added to an existing page: same file count, new entry hash.
+	assert.equal(
+		state.needsSync(doc("doc-1", "Notes", 5, "hash-after-edit")),
+		true
+	);
+});
+
+test("needsSync skips documents whose entry hash and file count are unchanged", () => {
+	const state = new SyncState();
+	state.syncedDocs["doc-1"] = syncedInfo("same-hash");
+
+	assert.equal(state.needsSync(doc("doc-1", "Notes", 5, "same-hash")), false);
+});
+
+test("needsSync re-syncs when state predates entry-hash tracking", () => {
+	const state = new SyncState();
+	state.syncedDocs["doc-1"] = syncedInfo();
+
+	// Re-sync once so any previously missed edits get picked up.
+	assert.equal(state.needsSync(doc("doc-1", "Notes", 5, "some-hash")), true);
+});
+
+test("needsSync falls back to the file-count comparison for synthetic docs without an entry hash", () => {
+	const state = new SyncState();
+	state.syncedDocs["doc-1"] = syncedInfo();
+
+	// The real client always supplies an entry hash; this covers test/synthetic inputs.
+	assert.equal(state.needsSync(doc("doc-1", "Notes", 5)), false);
+	assert.equal(state.needsSync(doc("doc-1", "Notes", 6)), true);
+});
+
+test("sync re-processes an edited document and still skips an unchanged one", async () => {
+	const { ops } = memoryFileOps();
+	const state = new SyncState();
+	state.syncedDocs["doc-1"] = syncedInfo("hash-before-edit");
+	state.syncedDocs["doc-2"] = syncedInfo("same-hash", "reMarkable/Ideas.pdf");
+	const manager = new SyncManager("/vault", "reMarkable", ops, state);
+
+	// Both docs keep file count 5; only doc-1's hash changed. The failing
+	// client makes the sync attempt visible as an error.
+	const results = await manager.sync(
+		failingClient([
+			doc("doc-1", "Notes", 5, "hash-after-edit"),
+			doc("doc-2", "Ideas", 5, "same-hash"),
+		]),
+		{ writeLog: false }
+	);
+
+	assert.equal(results.skipped.length, 1);
+	assert.equal(results.errorDetails.length, 1);
+	assert.equal(results.errorDetails[0].docId, "doc-1");
+});
+
+test("a successful sync persists the entry hash so the next run skips", async () => {
+	const { ops, files } = memoryFileOps();
+	const manager = new SyncManager("/vault", "reMarkable", ops, new SyncState());
+	const client = successClient([doc("doc-1", "Notes", 1, "hash-1")]);
+
+	const first = await manager.sync(client, { writeLog: false });
+	assert.equal(first.synced.length, 1);
+	assert.equal(first.errors.length, 0);
+	assert.ok(files.has("/vault/reMarkable/Notes.pdf"), "PDF written");
+
+	const state = JSON.parse(
+		files.get("/vault/reMarkable/.remarkable-sync-state.json")!
+	);
+	assert.equal(state.synced_docs["doc-1"].entryHash, "hash-1");
+
+	// Fresh manager (reloaded state), unchanged doc: must skip, not re-download.
+	const reloaded = await SyncManager.create("/vault", "reMarkable", ops);
+	const second = await reloaded.sync(client, { writeLog: false });
+	assert.equal(second.skipped.length, 1);
+	assert.equal(second.synced.length, 0);
+});
+
+test("a re-render that produces identical bytes skips the vault write", async () => {
+	const { ops, binaryWrites } = memoryFileOps();
+	const manager = new SyncManager("/vault", "reMarkable", ops, new SyncState());
+
+	await manager.sync(successClient([doc("doc-1", "Notes", 1, "hash-1")]), {
+		writeLog: false,
+	});
+	assert.equal(binaryWrites.length, 1);
+
+	// Metadata-only change: new entry hash, same rendered bytes.
+	const results = await manager.sync(
+		successClient([doc("doc-1", "Notes", 1, "hash-2")]),
+		{ writeLog: false }
+	);
+	assert.equal(results.synced.length, 1);
+	assert.equal(binaryWrites.length, 1, "identical PDF must not be rewritten");
+});
+
+test("a renamed document moves its PDF instead of leaving a duplicate", async () => {
+	const { ops, files } = memoryFileOps();
+	const manager = new SyncManager("/vault", "reMarkable", ops, new SyncState());
+
+	await manager.sync(successClient([doc("doc-1", "Notes", 1, "hash-1")]), {
+		writeLog: false,
+	});
+	assert.ok(files.has("/vault/reMarkable/Notes.pdf"));
+
+	// Rename on the device: same content, new name and entry hash.
+	await manager.sync(successClient([doc("doc-1", "Meeting", 1, "hash-2")]), {
+		writeLog: false,
+	});
+	assert.ok(files.has("/vault/reMarkable/Meeting.pdf"), "new path written");
+	assert.ok(
+		!files.has("/vault/reMarkable/Notes.pdf"),
+		"old path must be cleaned up"
+	);
+});
+
+test("dry-run does not touch the sync state file", async () => {
+	const { ops, files } = memoryFileOps();
+	const manager = new SyncManager("/vault", "reMarkable", ops, new SyncState());
+
+	const results = await manager.sync(
+		successClient([doc("doc-1", "Notes", 1, "hash-1")]),
+		{ dryRun: true, writeLog: false }
+	);
+
+	assert.equal(results.synced.length, 1);
+	assert.equal(
+		files.has("/vault/reMarkable/.remarkable-sync-state.json"),
+		false,
+		"dry-run must not write state"
+	);
+	assert.equal(files.has("/vault/reMarkable/Notes.pdf"), false);
 });
 
 test("an empty subfolder writes at the vault root without a leading slash", async () => {

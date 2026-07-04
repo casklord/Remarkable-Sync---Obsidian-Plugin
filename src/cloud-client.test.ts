@@ -52,14 +52,15 @@ function mockFileOps(): FileOps {
 		writeBinaryFile: async () => {},
 		mkdir: async () => {},
 		exists: async () => true,
+		deleteFile: async () => {},
 	};
 }
 
 /** Build a fetch mock that serves a one-document tree and records every call. */
-function makeFetch(calls: Recorded[]): FetchFn {
+function makeFetch(calls: Recorded[], parent = ""): FetchFn {
 	const rootIndex = `3\n${DOC_HASH}:80000000:${DOC_UUID}:1:100`;
 	const docIndex = `3\n${META_HASH}:0:${DOC_UUID}.metadata:1:50`;
-	const metadata = JSON.stringify({ visibleName: "Test Doc", type: "DocumentType", parent: "" });
+	const metadata = JSON.stringify({ visibleName: "Test Doc", type: "DocumentType", parent });
 
 	return async (url, options) => {
 		const rmFilename = options?.headers?.["rm-filename"];
@@ -94,6 +95,16 @@ test("listDocuments sends rm-filename header for root, doc index, and content bl
 	assert.equal(byHash(DOC_HASH)?.rmFilename, `${DOC_UUID}.docSchema`);
 	// Content blob must be requested with its real filename from the index.
 	assert.equal(byHash(META_HASH)?.rmFilename, `${DOC_UUID}.metadata`);
+});
+
+test("a document reparented to trash is marked trashed", async () => {
+	const client = new RemarkableCloudClient("/cfg", mockFileOps(), makeFetch([], "trash"));
+	await client.init();
+
+	const docs = await client.listDocuments();
+
+	assert.equal(docs.length, 1);
+	assert.equal(docs[0].isTrashed, true);
 });
 
 test("every /files/ request carries a non-empty rm-filename header", async () => {

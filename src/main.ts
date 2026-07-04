@@ -133,6 +133,9 @@ export default class RemarkableSyncPlugin extends Plugin {
 			async exists(filePath: string): Promise<boolean> {
 				return fs.existsSync(filePath);
 			},
+			async deleteFile(filePath: string): Promise<void> {
+				fs.rmSync(filePath, { force: true });
+			},
 		};
 	}
 
@@ -182,6 +185,10 @@ export default class RemarkableSyncPlugin extends Plugin {
 			},
 			async exists(filePath: string): Promise<boolean> {
 				return adapter.exists(normalizePath(filePath));
+			},
+			async deleteFile(filePath: string): Promise<void> {
+				const p = normalizePath(filePath);
+				if (await adapter.exists(p)) await adapter.remove(p);
 			},
 		};
 	}
