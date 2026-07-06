@@ -2,6 +2,8 @@
 
 Sync your reMarkable Paper Pro documents to your Obsidian vault as high-fidelity PDFs.
 
+📦 Available on the [Obsidian Community Plugins directory](https://community.obsidian.md/plugins/remarkable-sync).
+
 > **Disclaimer:** This is an unofficial, community-built plugin. It is not affiliated with, endorsed by, or supported by reMarkable AS. "reMarkable" is a trademark of reMarkable AS, used here only to describe compatibility.
 
 If you find this plugin useful, please consider [supporting its development](https://timdom.gumroad.com/l/remarkkable-to-obsidian-sync-plugin) or buying me a coffee:
