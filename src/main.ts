@@ -79,9 +79,8 @@ export default class RemarkableSyncPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-		if (!isOutputFormat(this.settings.outputFormat)) {
-			this.settings.outputFormat = DEFAULT_SETTINGS.outputFormat;
-		}
+		if (!isOutputFormat(this.settings.outputFormat)) this.settings.outputFormat = DEFAULT_SETTINGS.outputFormat;
+		
 	}
 
 	async saveSettings(): Promise<void> {
